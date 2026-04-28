@@ -1,0 +1,2 @@
+- [IMC Prosperity 4 project](project_imc_prosperity4.md) — competition repo, organized by round; currently working on Round 4 voucher strategy
+- [Round 4 v6 strategy](project_round4_v6.md) — current best Round 4 submission (+$64,364), mean-reversion on VEV/HYDROGEL underlyings via vouchers
