@@ -1,18 +1,35 @@
 """
-v33 — v32 result was no-op ($85,887.88, identical to v31). UV_VISOR_AMBER abandoned.
+v34 — ARCHITECTURAL PIVOT toward $150k+.
 
-Single change vs v32: TRANSLATOR_VOID_BLUE MM q=2 -> q=3.
-  v32 LIVE: TRANSLATOR_VOID_BLUE = $1,612 at q=2 = $806 per quote unit.
-  Highest yield-per-unit among the q=2 MM products that v27 did NOT already test.
-  Bounded downside: at worst regime regresses to ~$1,000.
-  Expected upside: +$300-700 if scaling is roughly linear.
+After single-shot tweaks hit diminishing returns ($678 -> $0 -> -$47), the
+next leap requires a fundamentally new alpha source. This file adds:
+
+  CONCURRENT MM ON IDLE SOLO PRODUCTS
+
+5 SOLO products earn extra spread during periods their MR signal is silent:
+  - PEBBLES_S             (q=2, ms=14) — SOLO PnL $950, idle most ticks
+  - PEBBLES_M             (q=2, ms=14) — SOLO PnL $810, idle most ticks
+  - TRANSLATOR_SPACE_GRAY (q=2, ms=10) — SOLO PnL $96 (heavily idle)
+  - MICROCHIP_CIRCLE      (q=2, ms=8)  — SOLO PnL $166 (heavily idle)
+  - ROBOT_DISHES          (q=2, ms=5)  — SOLO PnL $1,019 (tight ms)
+
+Gating prevents conflict with SOLO:
+  - Skip if SOLO produced ANY orders this tick (solo_acted set)
+  - Skip if |position| > q (don't push toward LIMIT when SOLO might fire next)
+
+VOID_BLUE reverted to q=2. DARK_MATTER reverted to ms=12.
+All other 49 products UNCHANGED from v32 LIVE baseline ($85,888).
+
+Expected uplift: +$2-8k LIVE → target ~$88-94k.
+Path to $150k will require stacking: pairs trading (v35), microprice MM skew
+(v36), and tuning subsequent iterations.
 
 History:
   v22 = friend's $85,113.88 baseline subset
-  v30 = v22 + TRANSLATOR_SPACE_GRAY MR add ($85,210)
-  v31 = v30 + 3 v27-validated MM size-ups (+$678 -> $85,888) [LIVE confirmed]
-  v32 = v31 + UV_VISOR_AMBER re-tune [no-op, $85,888 identical]
-  v33 = v32 + TRANSLATOR_VOID_BLUE q=2->3 [THIS FILE]
+  v31 = v22 + SPACE_GRAY MR + 3 size-ups -> $85,888 [LIVE]
+  v32 = v31 + UV_AMBER tweak [no-op]
+  v33 = v32 + VOID_BLUE q=2->3 [-$47, reverted]
+  v34 = v32 + concurrent-MM on 5 SOLO products [THIS FILE]
 """
 
 from datamodel import OrderDepth, TradingState, Order
@@ -89,7 +106,7 @@ class Trader:
         "SNACKPACK_CHOCOLATE":         2,
         "OXYGEN_SHAKE_GARLIC":         2,
         "SNACKPACK_STRAWBERRY":        4,
-        "TRANSLATOR_VOID_BLUE":        3,  # v33: q=2→3, $806/unit yield in v32 — try compounding
+        "TRANSLATOR_VOID_BLUE":        2,  # v33 tested q=3, lost $47 (37% per-unit penalty); reverted
         "MICROCHIP_TRIANGLE":          3,
         "TRANSLATOR_GRAPHITE_MIST":    5,  # v27 PROVEN: q=3→5 added +$359
         "SLEEP_POD_COTTON":            4,
@@ -130,6 +147,20 @@ class Trader:
 
     MM_PRODUCTS = set(MM_QUOTE_SIZE.keys())
 
+    # ── Concurrent MM on SOLO products during idle periods ──────────────────
+    # When a SOLO product's z-signal is not firing (no orders this tick) and
+    # current position is small, we can earn the spread with a tiny MM quote.
+    # Each tick the gating is: skip if SOLO acted OR |position| > q.
+    # Products picked: SOLO products with low PnL OR low signal-fire rate
+    # where idle periods dominate (>90% of ticks).
+    MM_ON_SOLO_IDLE = {
+        "PEBBLES_S":             {"q": 2, "ms": 14, "start": 5000},
+        "PEBBLES_M":             {"q": 2, "ms": 14, "start": 5000},
+        "TRANSLATOR_SPACE_GRAY": {"q": 2, "ms": 10, "start": 5000},
+        "MICROCHIP_CIRCLE":      {"q": 2, "ms": 8,  "start": 5000},
+        "ROBOT_DISHES":          {"q": 2, "ms": 5,  "start": 5000},
+    }
+
     def run(self, state: TradingState):
         memory = self._decode(state.traderData)
         memory.setdefault("mid", {})
@@ -138,12 +169,14 @@ class Trader:
         result: Dict[str, List[Order]] = {}
 
         # Mean reversion
+        solo_acted = set()
         for product, params in self.SOLO.items():
             orders = self._solo_orders(product, params, state, memory)
             if orders:
                 result[product] = orders
+                solo_acted.add(product)
 
-        # Market making
+        # Market making (existing 16 products)
         for product in self.MM_PRODUCTS:
             od = state.order_depths.get(product)
             if od is None:
@@ -151,6 +184,48 @@ class Trader:
             orders = self._market_make(product, od, state.position.get(product, 0), state.timestamp)
             if orders:
                 result[product] = orders
+
+        # Concurrent MM on SOLO products during their idle periods.
+        # Gate: skip if SOLO acted this tick OR position would force a side-skew.
+        for product, cfg in self.MM_ON_SOLO_IDLE.items():
+            if product in solo_acted:
+                continue
+            if state.timestamp < cfg["start"]:
+                continue
+            pos = state.position.get(product, 0)
+            q = cfg["q"]
+            # Only quote when position is near 0 — avoid pushing past LIMIT
+            # if SOLO suddenly fires next tick wanting target ±10.
+            if abs(pos) > q:
+                continue
+            od = state.order_depths.get(product)
+            if od is None or not od.buy_orders or not od.sell_orders:
+                continue
+            best_bid = max(od.buy_orders)
+            best_ask = min(od.sell_orders)
+            if best_bid >= best_ask:
+                continue
+            spread = best_ask - best_bid
+            if spread > cfg["ms"]:
+                continue
+            if spread >= 4:
+                bid_p = best_bid + 1
+                ask_p = best_ask - 1
+            else:
+                bid_p = best_bid
+                ask_p = best_ask
+            if bid_p >= ask_p:
+                continue
+            new_orders = []
+            buy_cap  = self.LIMIT - pos
+            sell_cap = self.LIMIT + pos
+            if buy_cap > 0:
+                new_orders.append(Order(product, bid_p,  min(q, buy_cap)))
+            if sell_cap > 0:
+                new_orders.append(Order(product, ask_p, -min(q, sell_cap)))
+            if new_orders:
+                # SOLO didn't act for this product (gated above), so safe to set.
+                result[product] = new_orders
 
         trader_data = self._encode(memory)
         if len(trader_data) > self.THRESHOLD:
