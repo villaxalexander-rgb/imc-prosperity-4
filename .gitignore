@@ -31,3 +31,10 @@ iv_grid.csv
 # Large/temp data
 *.zip
 *.tar.gz
+
+# Round 5 raw data (regen from IMC competition portal)
+round_5/data/*.csv
+
+# Submission artifacts
+round_5/submissions/
+*.log
